@@ -1,0 +1,61 @@
+import socket
+from inputs import get_gamepad
+
+# Initialize socket communication with Arduino
+arduino_ip = '192.168.0.101'  # Replace with your Arduino's IP address
+arduino_port = 12345  # Replace with your chosen port number
+
+def connect_to_arduino():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(10)  # Set a timeout for the socket connection
+    try:
+        sock.connect((arduino_ip, arduino_port))
+        print("Connected to Arduino")
+        return sock
+    except socket.error as e:
+        print(f"Error connecting to Arduino: {e}")
+        return None
+
+def map_value(value, in_min, in_max, out_min, out_max):
+    return int((value - in_min) * (out_max - out_min) / (in_max - in_min) + out_min)
+
+def send_to_arduino(sock, left_motor, right_motor):
+    command = f"{left_motor},{right_motor}\n"
+    try:
+        sock.send(command.encode())
+        print(f"Sent to Arduino: {command.strip()}")
+    except socket.error as e:
+        print(f"Error sending data: {e}")
+        sock.close()  # Close the socket on error
+        return False  # Indicate that the connection needs to be reset
+    return True
+
+sock = connect_to_arduino()
+
+# Initialize joystick inputs to the neutral position (1500 microseconds)
+left_motor = 1500
+right_motor = 1500
+send_to_arduino(sock, left_motor, right_motor)
+
+try:
+    while True:
+        events = get_gamepad()
+        for event in events:
+            if event.ev_type == 'Absolute':
+                if event.code == 'ABS_Y':  # Left joystick ver axis
+                    # print(f"Raw ABS_Y value: {event.state}")
+                    left_motor = map_value(event.state, -32768, 32767, 1000, 2000)
+                   # print(f"Mapped left_motor value: {left_motor}")
+                elif event.code == 'ABS_RY':  # Right joystick vertical axis
+                   # print(f"Raw ABS_Y value: {event.state}")
+                    right_motor = map_value(event.state, -32768, 32767, 1000, 2000)
+                   # print(f"Mapped right_motor value: {right_motor}")
+        if sock:
+            if not send_to_arduino(sock, left_motor, right_motor):
+                sock = connect_to_arduino()
+        else:
+            sock = connect_to_arduino()
+except KeyboardInterrupt:
+    if sock:
+        sock.close()
+    print("Program terminated")

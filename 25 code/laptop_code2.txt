@@ -1,0 +1,91 @@
+import socket
+import pygame
+import time
+
+# Initialize Pygame and the joystick
+pygame.init()
+pygame.joystick.init()
+
+if pygame.joystick.get_count() == 0:
+    print("No joystick detected!")
+    pygame.quit()
+    exit()
+
+joystick = pygame.joystick.Joystick(0)
+joystick.init()
+print("Joystick detected:", joystick.get_name())
+
+# Arduino IP and port (change to match your Arduino's IP)
+arduino_ip = "192.168.0.101"
+port = 12345
+
+# Create a TCP socket
+try:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.connect((arduino_ip, port))
+    print("Connected to Arduino.")
+except socket.error as e:
+    print(f"Connection failed: {e}")
+    pygame.quit()
+    exit()
+
+# Helper functions
+def map_axis_to_pwm(axis_val):
+    axis_val = max(-1.0, min(1.0, axis_val))  # Clamp between -1 and 1
+    pwm = int(1500 + axis_val * 500)          # Range: [1000, 2000]
+    pwm = int(round(pwm / 10.0) * 10)         # Round to nearest 10us
+    return pwm
+
+def apply_dead_zone(value, threshold=0.05):
+    return 0 if abs(value) < threshold else value
+
+# Initialize values
+vertical_servo_input = 0
+vertical_servo_pwm = 1500  # Neutral
+prev_message = ""  # To track if message changed
+
+try:
+    while True:
+        pygame.event.pump()  # Update joystick state
+
+        # Joystick axes for movement
+        left_axis = apply_dead_zone(joystick.get_axis(1))    # Left stick Y
+        right_axis = apply_dead_zone(joystick.get_axis(3))   # Right stick Y
+
+        left_pwm = map_axis_to_pwm(-left_axis)   # Inverted for forward
+        right_pwm = map_axis_to_pwm(right_axis)
+
+        # Triggers for vertical servo
+        lt_val = joystick.get_axis(2)  # LT
+        rt_val = joystick.get_axis(5)  # RT
+
+        # Normalize triggers to [0, 1]
+        lt_val = (lt_val + 1) / 2
+        rt_val = (rt_val + 1) / 2
+
+        # Apply dead zone to triggers
+        lt_val = apply_dead_zone(lt_val)
+        rt_val = apply_dead_zone(rt_val)
+
+        # Compute servo input if any trigger is pressed
+        if lt_val > 0 or rt_val > 0:
+            vertical_servo_input = lt_val - rt_val  # Range [-1, 1]
+            vertical_servo_pwm = int(1500 + vertical_servo_input * 500)  # [1000, 2000]
+            vertical_servo_pwm = int(round(vertical_servo_pwm / 10.0) * 10)
+
+        # Compose message and send only if changed
+        message = f"{left_pwm},{right_pwm},{vertical_servo_pwm}\n"
+        if message != prev_message:
+            print(f"Left: {left_axis:.2f}, Right: {right_axis:.2f}, LT: {lt_val:.2f}, RT: {rt_val:.2f}")
+            print("Sending:", message.strip())
+            sock.sendall(message.encode())
+            prev_message = message
+
+        time.sleep(0.1)
+
+except KeyboardInterrupt:
+    print("Exiting...")
+
+finally:
+    sock.close()
+    pygame.quit()

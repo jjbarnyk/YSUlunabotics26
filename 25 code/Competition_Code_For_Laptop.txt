@@ -1,0 +1,260 @@
+import socket
+import pygame
+import sys
+import time
+import threading
+
+# Configuration
+ARDUINO_IP = '192.168.0.101'
+PORT = 12345
+
+# Connect to Arduino via TCP
+try:
+    print(f"Connecting to Arduino at {ARDUINO_IP}:{PORT}...")
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.connect((ARDUINO_IP, PORT))
+    print("Connected.")
+except socket.error as e:
+    print(f"Connection failed: {e}")
+    sys.exit()
+
+# Pygame controller setup
+pygame.init()
+pygame.joystick.init()
+
+if pygame.joystick.get_count() == 0:
+    print("No controller detected.")
+    sys.exit()
+
+joystick = pygame.joystick.Joystick(0)
+joystick.init()
+print(f"Using controller: {joystick.get_name()}")
+
+# Constants
+LB_BUTTON = 5
+RB_BUTTON = 4
+X_BUTTON = 2
+B_BUTTON = 1
+START_BUTTON = 7
+LT_AXIS = 5
+RT_AXIS = 4
+LEFT_JOYSTICK_Y = 1
+RIGHT_JOYSTICK_Y = 3
+TRIGGER_THRESHOLD = 0.1
+JOYSTICK_DEADZONE = 0.1
+
+# Speed mode state
+speed_modes = ["fast", "average", "slow"]
+speed_mode_index = 0
+x_button_last = 0
+
+# Timed run state
+timed_run_active = False
+servo_pwm = 1500
+last_command = ""
+last_motor_cmd = ""
+sequence_cancelled = False
+
+def send_command(cmd):
+    try:
+        sock.sendall((cmd + '\n').encode())
+        print(f"Sent: {cmd}")
+    except Exception as e:
+        print(f"Error sending: {e}")
+
+def scale_axis(val):
+    mode = speed_modes[speed_mode_index]
+    scale = 500
+    return int(1500 + (-val * scale))
+
+def run_wheel_forward():
+    send_command("1625,1375")
+    for _ in range(int(9.35 / 0.1)):
+        if sequence_cancelled:
+            send_command("stop")
+            send_command("1500,1500")
+            return
+        time.sleep(0.1)
+    send_command("1500,1500")
+
+def run_stepper():
+    time.sleep(0.5)
+    if sequence_cancelled: 
+        send_command("stop")
+        return
+    send_command("forward")
+    for _ in range(int(3 / 0.1)):
+        if sequence_cancelled:
+            send_command("stop")
+            return
+        time.sleep(0.1)
+    send_command("stop")
+    time.sleep(23)
+    if sequence_cancelled: 
+        send_command("stop")
+        return
+    send_command("backward")
+    for _ in range(int(3 / 0.1)):
+        if sequence_cancelled:
+            send_command("stop")
+            return
+        time.sleep(0.1)
+    send_command("stop")
+
+def run_servo():
+    global servo_pwm
+    time.sleep(1)
+    if sequence_cancelled: 
+        return
+    servo_pwm = 1200
+    send_command(f"SERVO:{servo_pwm}")
+    for _ in range(int(8 / 0.1)):
+        if sequence_cancelled:
+            return
+        time.sleep(0.1)
+    servo_pwm = 1800
+    send_command(f"SERVO:{servo_pwm}")
+def run_wheel_backward():
+    time.sleep(4)
+    if sequence_cancelled: 
+        send_command("stop")
+        send_command("1500,1500")
+        return
+    send_command("1375,1625")
+    for _ in range(int(9.35 / 0.1)):
+        if sequence_cancelled:
+            send_command("stop")
+            send_command("1500,1500")
+            return
+        time.sleep(0.1)
+    send_command("1500,1500")
+
+try:
+    while True:
+        pygame.event.pump()
+
+        # Speed toggle
+        x_button = joystick.get_button(X_BUTTON)
+        if x_button and not x_button_last:
+            speed_mode_index = (speed_mode_index + 1) % len(speed_modes)
+            print(f"Speed mode: {speed_modes[speed_mode_index]}")
+        x_button_last = x_button
+
+        # Cancel sequence
+        b_button = joystick.get_button(B_BUTTON)
+        if b_button and timed_run_active:
+            print("B button pressed — cancelling sequence!")
+            sequence_cancelled = True
+            # Send stop repeatedly to be sure motors halt
+            for _ in range(3):
+                send_command("stop")
+                send_command("1500,1500")
+                time.sleep(0.1)
+
+        # Stepper manual control
+        lb = joystick.get_button(LB_BUTTON)
+        rb = joystick.get_button(RB_BUTTON)
+        if lb and not rb and last_command != "forward":
+            send_command("forward")
+            last_command = "forward"
+        elif rb and not lb and last_command != "backward":
+            send_command("backward")
+            last_command = "backward"
+        elif not lb and not rb and last_command != "stop":
+            send_command("stop")
+            last_command = "stop"
+
+        # Servo trigger control
+        lt_val = joystick.get_axis(LT_AXIS)
+        rt_val = joystick.get_axis(RT_AXIS)
+        if lt_val > TRIGGER_THRESHOLD:
+            servo_pwm = max(1000, servo_pwm - 10)
+            send_command(f"SERVO:{servo_pwm}")
+            time.sleep(0.005)
+        if rt_val > TRIGGER_THRESHOLD:
+            servo_pwm = min(2000, servo_pwm + 10)
+            send_command(f"SERVO:{servo_pwm}")
+            time.sleep(0.05)
+
+        # Start sequence
+        start_button = joystick.get_button(START_BUTTON)
+        if start_button and not timed_run_active:
+            print("Starting synchronized sequence.")
+            timed_run_active = True
+            sequence_cancelled = False
+
+            forward_thread = threading.Thread(target=run_wheel_forward)
+            stepper_thread = threading.Thread(target=run_stepper)
+            servo_thread = threading.Thread(target=run_servo)
+            backward_thread = threading.Thread(target=run_wheel_backward)
+
+            forward_thread.start()
+            stepper_thread.start()
+            servo_thread.start()
+
+            # Monitor first phase threads
+            while forward_thread.is_alive() or servo_thread.is_alive():
+                pygame.event.pump()
+                b_button = joystick.get_button(B_BUTTON)
+                if b_button:
+                    print("Cancel requested during sequence")
+                    sequence_cancelled = True
+                    for _ in range(3):
+                        send_command("stop")
+                        send_command("1500,1500")
+                        time.sleep(0.1)
+                    timed_run_active = False
+                    break
+                time.sleep(0.05)
+
+            forward_thread.join()
+            servo_thread.join()
+
+            if not sequence_cancelled:
+                backward_thread.start()
+
+                # Monitor second phase threads
+                while backward_thread.is_alive() or stepper_thread.is_alive():
+                    pygame.event.pump()
+                    b_button = joystick.get_button(B_BUTTON)
+                    if b_button:
+                        print("Cancel requested during sequence")
+                        sequence_cancelled = True
+                        for _ in range(3):
+                            send_command("stop")
+                            send_command("1500,1500")
+                            time.sleep(0.1)
+                        timed_run_active = False
+                        break
+                    time.sleep(0.05)
+
+                backward_thread.join()
+                stepper_thread.join()
+
+            servo_pwm = 1500
+            timed_run_active = False
+            print("Sequence complete.")
+
+        if not timed_run_active:
+            left_y = joystick.get_axis(LEFT_JOYSTICK_Y)
+            right_y = joystick.get_axis(RIGHT_JOYSTICK_Y)
+            if abs(left_y) > JOYSTICK_DEADZONE or abs(right_y) > JOYSTICK_DEADZONE:
+                left_pwm = scale_axis(left_y)
+                right_pwm = scale_axis(-right_y)
+                motor_cmd = f"{left_pwm},{right_pwm}"
+                if motor_cmd != last_motor_cmd:
+                    send_command(motor_cmd)
+                    last_motor_cmd = motor_cmd
+            else:
+                if last_motor_cmd != "1500,1500":
+                    send_command("1500,1500")
+                    last_motor_cmd = "1500,1500"
+
+        time.sleep(0.05)
+
+except KeyboardInterrupt:
+    print("Exiting...")
+
+finally:
+    sock.close()
+    pygame.quit()

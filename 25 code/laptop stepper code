@@ -1,0 +1,27 @@
+import socket
+
+# Arduino IP and port (replace with your Arduino's IP)
+arduino_ip = "192.168.0.101"  # Replace with your Arduino's IP address
+port = 12345  # Port used by the Arduino server
+
+# Create a TCP socket
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+try:
+    sock.connect((arduino_ip, port))
+    print("Connected to Arduino.")
+
+    # Send commands to Arduino to control the stepper motor
+    while True:
+        command = input("Enter command (forward, backward, stop): ").strip()
+
+        if command in ["forward", "backward", "stop"]:
+            sock.sendall((command + '\n').encode())  # Send command to Arduino
+        else:
+            print("Invalid command. Please enter 'forward', 'backward', or 'stop'.")
+            
+except socket.error as e:
+    print(f"Connection failed: {e}")
+
+finally:
+    sock.close()
