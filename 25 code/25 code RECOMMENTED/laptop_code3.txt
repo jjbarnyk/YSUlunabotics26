@@ -1,0 +1,134 @@
+import socket
+import pygame
+import sys
+import time
+
+# Configuration
+ARDUINO_IP = '192.168.0.101'
+PORT = 12345
+
+# Connect to Arduino via TCP
+try:
+    print(f"Connecting to Arduino at {ARDUINO_IP}:{PORT}...")
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.connect((ARDUINO_IP, PORT))
+    print("Connected.")
+except socket.error as e:
+    print(f"Connection failed: {e}")
+    sys.exit()
+
+# Pygame controller setup
+pygame.init()
+pygame.joystick.init()
+
+if pygame.joystick.get_count() == 0:
+    print("No controller detected.")
+    sys.exit()
+
+joystick = pygame.joystick.Joystick(0)
+joystick.init()
+print(f"Using controller: {joystick.get_name()}")
+
+# Constants
+LB_BUTTON = 4
+RB_BUTTON = 5
+X_BUTTON = 2  # X button index
+LT_AXIS = 4
+RT_AXIS = 5
+LEFT_JOYSTICK_Y = 1
+RIGHT_JOYSTICK_Y = 3
+TRIGGER_THRESHOLD = 0.1
+JOYSTICK_DEADZONE = 0.1
+
+# Speed mode state
+speed_modes = ["fast", "average", "slow"]
+speed_mode_index = 0
+x_button_last = 0
+
+def send_command(cmd):
+    try:
+        sock.sendall((cmd + '\n').encode())
+        print(f"Sent: {cmd}")
+    except Exception as e:
+        print(f"Error sending: {e}")
+
+# Map joystick axis to PWM
+def scale_axis(val):
+    mode = speed_modes[speed_mode_index]
+    if mode == "fast":
+        scale = 500
+    elif mode == "average":
+        scale = 250
+    else:  # slow
+        scale = 125
+    return int(1500 + (-val * scale))
+
+# State variables
+last_command = ""
+last_motor_cmd = ""
+servo_pwm = 1500
+
+try:
+    while True:
+        pygame.event.pump()
+
+        # --- Speed Toggle with X Button ---
+        x_button = joystick.get_button(X_BUTTON)
+        if x_button and not x_button_last:
+            speed_mode_index = (speed_mode_index + 1) % len(speed_modes)
+            print(f"Speed mode: {speed_modes[speed_mode_index]}")
+        x_button_last = x_button
+
+        # --- Stepper Control with Buttons ---
+        lb = joystick.get_button(LB_BUTTON)
+        rb = joystick.get_button(RB_BUTTON)
+
+        if lb and not rb and last_command != "forward":
+            send_command("forward")
+            last_command = "forward"
+        elif rb and not lb and last_command != "backward":
+            send_command("backward")
+            last_command = "backward"
+        elif not lb and not rb and last_command != "stop":
+            send_command("stop")
+            last_command = "stop"
+
+        # --- Bucket Servo Control with Triggers ---
+        lt_val = joystick.get_axis(LT_AXIS)
+        rt_val = joystick.get_axis(RT_AXIS)
+
+        if lt_val > TRIGGER_THRESHOLD:
+            servo_pwm = max(1000, servo_pwm - 10)
+            send_command(f"SERVO:{servo_pwm}")
+            time.sleep(0.05)
+
+        if rt_val > TRIGGER_THRESHOLD:
+            servo_pwm = min(2000, servo_pwm + 10)
+            send_command(f"SERVO:{servo_pwm}")
+            time.sleep(0.05)
+
+        # --- Wheel Motor Control with Joysticks ---
+        left_y = joystick.get_axis(LEFT_JOYSTICK_Y)
+        right_y = joystick.get_axis(RIGHT_JOYSTICK_Y)
+
+        if abs(left_y) > JOYSTICK_DEADZONE or abs(right_y) > JOYSTICK_DEADZONE:
+            left_pwm = scale_axis(left_y)
+            right_pwm = scale_axis(-right_y)  # Reverse right motor
+            motor_cmd = f"{left_pwm},{right_pwm}"
+            if motor_cmd != last_motor_cmd:
+                send_command(motor_cmd)
+                last_motor_cmd = motor_cmd
+        else:
+            if last_motor_cmd != "1500,1500":
+                send_command("1500,1500")  # Stop motors
+                last_motor_cmd = "1500,1500"
+
+        time.sleep(0.05)
+
+except KeyboardInterrupt:
+    print("Exiting...")
+
+finally:
+    sock.close()
+    pygame.quit()
+    print("Disconnected.")

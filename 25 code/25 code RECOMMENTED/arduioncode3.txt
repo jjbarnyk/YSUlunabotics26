@@ -1,0 +1,124 @@
+#include <WiFi.h>
+#include <MobaTools.h>
+#include <Servo.h>
+
+// ----- Wi-Fi Setup -----
+const char* ssid     = "Lunabotics_25";
+const char* password = "ysu12345";
+IPAddress local_IP(192,168,0,101), gateway(192,168,0,254), subnet(255,255,255,0);
+WiFiServer server(12345);
+
+// ----- Stepper Setup -----
+#define STEP_PIN 2
+#define DIR_PIN  3
+#define ENA_PIN  4
+MoToStepper stepper(200, STEPDIR);
+
+// ----- Bucket-servo Setup -----
+Servo rotServo1, rotServo2;
+const int bucketPinL = 6, bucketPinR = 5;
+
+// ----- Wheel-motor Setup -----
+Servo motorA, motorC, motorB, motorD;
+const int pinA = 9, pinC = 10, pinB = 11, pinD = 12;
+
+void setup() {
+  Serial.begin(9600);
+
+  // Stepper init
+  stepper.attach(STEP_PIN, DIR_PIN);
+  stepper.setRampLen(190);
+  stepper.setSpeed(5000);
+  pinMode(ENA_PIN, OUTPUT);
+  digitalWrite(ENA_PIN, HIGH);
+
+  // Bucket servos
+  rotServo1.attach(bucketPinL);
+  rotServo2.attach(bucketPinR);
+  rotServo1.writeMicroseconds(1500);
+  rotServo2.writeMicroseconds(1500);
+
+  // Wheel servos
+  motorA.attach(pinA);
+  motorC.attach(pinC);
+  motorB.attach(pinB);
+  motorD.attach(pinD);
+
+  // Wi-Fi init
+  WiFi.config(local_IP, gateway, subnet);
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    Serial.print(".");
+    delay(500);
+  }
+  Serial.println("\nWiFi connected: " + WiFi.localIP().toString());
+  server.begin();
+  Serial.println("Server started on port 12345");
+}
+
+void loop() {
+  WiFiClient client = server.available();
+
+  if (client) {
+    Serial.println("Client connected");
+
+    while (client.connected()) {
+      if (client.available()) {
+        String data = client.readStringUntil('\n');
+        data.trim();
+
+        Serial.print("Received: ");
+        Serial.println(data);
+
+        // 1) Stepper control
+        if (data == "forward") {
+          stepper.rotate(1);
+          Serial.println("→ stepper forward");
+        } else if (data == "backward") {
+          stepper.rotate(-1);
+          Serial.println("→ stepper backward");
+        } else if (data == "stop") {
+          stepper.stop();
+          Serial.println("→ stepper stop");
+        }
+
+        // 2) Bucket servos: "SERVO:<pwm>"
+        else if (data.startsWith("SERVO:")) {
+          int pwm = data.substring(6).toInt();
+          pwm = constrain(pwm, 1000, 2000);
+          int inv = 3000 - pwm;
+          rotServo1.writeMicroseconds(pwm);
+          rotServo2.writeMicroseconds(inv);
+
+          Serial.print("→ buckets PWM ");
+          Serial.print(pwm);
+          Serial.print(" / ");
+          Serial.println(inv);
+        }
+
+        // 3) Wheel servos: "left_val,right_val"
+        else {
+          int comma = data.indexOf(',');
+          if (comma > 0) {
+            int lv = data.substring(0, comma).toInt();
+            int rv = data.substring(comma + 1).toInt();
+            motorA.writeMicroseconds(lv);
+            motorC.writeMicroseconds(lv);
+            motorB.writeMicroseconds(rv);
+            motorD.writeMicroseconds(rv);
+
+            Serial.print("→ wheels L=");
+            Serial.print(lv);
+            Serial.print(" R=");
+            Serial.println(rv);
+          }
+        }
+      }
+    }
+
+    // Client disconnected
+    client.stop();
+    Serial.println("Client disconnected");
+  }
+}
